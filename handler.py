@@ -22,15 +22,20 @@ def handler(job):
     if not blend_url:
         return {"error": "Missing blend_url in input"}
 
-    frame_start = int(inp.get("frame_start", 1))
-    frame_end = int(inp.get("frame_end", 250))
+    # IMPORTANT: Get frame range from input, these will OVERRIDE .blend file settings
+    frame_start = inp.get("frame_start")  # Can be None
+    frame_end = inp.get("frame_end")      # Can be None
 
     print(f"📄 Blend URL: {blend_url}")
-    print(f"🎬 Frames: {frame_start} → {frame_end}")
+    
+    if frame_start is not None and frame_end is not None:
+        print(f"🎬 Custom frame range: {frame_start} → {frame_end}")
+    else:
+        print(f"🎬 Using .blend file's frame range")
 
     # 1) Download .blend file
     blend_path = "/workspace/scene.blend"
-    print("⬇️ Downloading .blend file...")
+    print("⬇️  Downloading .blend file...")
     r = requests.get(blend_url)
     r.raise_for_status()
     with open(blend_path, "wb") as f:
@@ -42,17 +47,28 @@ def handler(job):
     os.makedirs(output_dir, exist_ok=True)
 
     # 3) Run Blender in background mode
-    # Blender image already has "blender" on PATH
     cmd = [
         "blender",
         "-b", blend_path,
         "--python", "/workspace/animation_render_script.py",
-        "--",
-        "--frame_start", str(frame_start),
-        "--frame_end", str(frame_end),
     ]
+    
+    # CRITICAL: Only add frame arguments if they were provided
+    # This ensures we OVERRIDE the .blend file's frame range
+    if frame_start is not None and frame_end is not None:
+        cmd.extend([
+            "--",
+            "--frame_start", str(frame_start),
+            "--frame_end", str(frame_end),
+        ])
+        print(f"✅ Passing frame range to Blender: {frame_start} to {frame_end}")
+    else:
+        # No frame range specified - Blender will use .blend file's range
+        print(f"✅ No frame override - using .blend file's settings")
 
     print("🎥 Running Blender...")
+    print(f"Command: {' '.join(cmd)}")
+    
     result = subprocess.run(cmd, capture_output=True, text=True)
     print("Blender STDOUT:\n", result.stdout)
     print("Blender STDERR:\n", result.stderr)
@@ -76,7 +92,7 @@ def handler(job):
     bucket = os.environ.get("AWS_BUCKET_NAME")
     aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID")
     aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-    aws_region = os.environ.get("AWS_REGION", "ap-south-1")  # adjust if needed
+    aws_region = os.environ.get("AWS_REGION", "ap-south-1")
 
     if not (bucket and aws_access_key and aws_secret_key):
         return {"error": "Missing AWS env vars in serverless endpoint"}
@@ -89,18 +105,25 @@ def handler(job):
     )
 
     key = f"blender_renders/{int(time.time())}_renders.zip"
-    print(f"☁️ Uploading to S3: s3://{bucket}/{key}")
+    print(f"☁️  Uploading to S3: s3://{bucket}/{key}")
 
     s3.upload_file(zip_path, bucket, key)
 
-    # Simple public-style URL (if bucket allows it or for presigned use)
-    s3_url = f"https://{bucket}.s3.{aws_region}.amazonaws.com/{key}"
+    # Generate presigned URL (works even if bucket is private)
+    s3_url = s3.generate_presigned_url(
+        'get_object',
+        Params={'Bucket': bucket, 'Key': key},
+        ExpiresIn=7200  # 2 hours
+    )
 
     print("✅ Uploaded to:", s3_url)
 
     return {
         "status": "ok",
-        "frames": {"start": frame_start, "end": frame_end},
+        "frames": {
+            "start": frame_start if frame_start else "auto", 
+            "end": frame_end if frame_end else "auto"
+        },
         "s3_url": s3_url,
     }
 
